@@ -1,0 +1,407 @@
+#this file needs to be paralelize
+
+
+
+library(readr)
+library(effsize)
+library(readxl)
+library(optparse)
+
+
+
+# optparse
+suppressPackageStartupMessages(require(optparse)) # don't say "Loading required package: optparse"
+option_list = list(
+  make_option(c("-a", "--analysis"), action="store", type = "character", default = "same_target",
+              help="type of analysis"),
+  make_option(c("-x", "--xaxis"), action="store", type = "character", default = "AZ628",
+              help="x axis value"),
+  make_option(c("-y", "--yaxis"), action="store", type = "character", default = "Dabrafenib",
+              help="y axis value"),
+  make_option(c("-t", "--target"), action="store", type = "character", default = "BRAF",
+              help="target for same target")
+)
+
+opt = parse_args(OptionParser(option_list=option_list))
+print(opt)
+analysis=opt$analysis
+type="CFE"
+target=as.character(gsub(pattern = "\'", replacement = '', x = noquote(opt$target),fixed = T))
+x_drug=as.character(gsub(pattern = "\'", replacement = '', x = noquote(opt$xaxis),fixed = T))
+y_drug=as.character(gsub(pattern = "\'", replacement = '', x = noquote(opt$yaxis),fixed = T))
+
+if(y_drug %in% c("Afuresertib", "Ipatasertib", "Irinotecan","Selumetinib")|x_drug %in% c("Afuresertib", "Ipatasertib", "Irinotecan","Selumetinib")){
+  stop("Forbiden drug")
+}
+
+loadCFES<-function(tissuename,typecfes){
+  tissuename=tissuename
+  
+  if (typecfes=="CGS"){
+    tissuepathcgs=as.character(paste(tissuename,".txt",sep=""))
+    tissuepathcgscl=as.character(paste(tissuename,"_SEQ_BEM.txt",sep=""))
+    if(!file.exists(paste("/g/strcombio/fsupek_home/bfito/Data/CFEs CGS tumors/",tissuepathcgs,sep=""))){tissabort("Tiss!GCs")}
+    cgs.tum=read.table(paste("/g/strcombio/fsupek_home/bfito/Data/CFEs CGS tumors/",tissuepathcgs,sep=""), header = T)
+    cgs.cl=read.table(paste("/g/strcombio/fsupek_home/bfito/Data/CFEs CGS CLs/",tissuepathcgscl,sep=""), header = T)
+    colnames(cgs.tum) = gsub("\\.", "-", colnames(cgs.tum))
+    colnames(cgs.tum) = gsub("(TCGA-..-....)-.*", "\\1", colnames(cgs.tum))
+    rownames(cgs.tum)<-cgs.tum$CG
+    cgs.tum<-cgs.tum[,-1:-2,drop=F]
+    
+    colnames(cgs.cl)<-gsub("^X", "", colnames(cgs.cl))
+    rownames(cgs.cl)<-cgs.cl$CG
+    cgs.cl<-cgs.cl[,-1:-2,drop=F]
+    
+    return(list(cgs.cl,cgs.tum))
+    
+  }
+  
+  if (typecfes=="CNV"){
+    
+    cna.info=read.xlsx("/g/strcombio/fsupek_home/bfito/TableS2D.xlsx",header=T,1,startRow =19)#Table S2D-> to map each region of the cna to the genes that contain -> each region have several sothere is no point of just show 20 genes in a plot
+    
+    id.info=read.xlsx("/g/strcombio/fsupek_home/bfito/TableS1D.xlsx",header=T,1,startRow=10)
+    names<-c("","Patiend ID","Cancer type", "WES data","CNA","MET","Hyp","MS","WES_ID","CNA_ID","MET_ID")
+    colnames(id.info)<-names
+    
+    
+    tissuepathcna=as.character(paste(tissuename,"_CNA_BEM.rdata.txt",sep=""))
+    if(!file.exists(paste("/g/strcombio/fsupek_home/bfito/Tumours_CNV_BEMs/",tissuepathcna,sep=""))){tissabort("Tiss!CNV")}
+    cna.tum=read.table(paste("/g/strcombio/fsupek_home/bfito/Tumours_CNV_BEMs/",tissuepathcna,sep=""),sep = "\t", header = T)
+    cna.cl=read.table(paste("/g/strcombio/fsupek_home/bfito/CellLine_CNV_BEMs/",tissuepathcna,sep=""),sep = "\t", header = T)
+    
+    cna.tum$X <- id.info$`Patiend ID`[match(cna.tum$X, id.info$CNA_ID)]
+    a<-subset(colnames(cna.tum),str_detect(colnames(cna.tum), "loss*") )
+    cna.tum<-cna.tum[,colnames(cna.tum) %in% a | colnames(cna.tum)=="X"] #kEEP JUST THE LOSS ONES
+    cna.tum<-cna.tum[!duplicated(cna.tum$X),]
+    cna.tum<-cna.tum[!is.na(cna.tum$X),]
+    rownames(cna.tum)<-cna.tum[,1]
+    cna.tum<-cna.tum[,-1]
+    cna.tum<-t(cna.tum)
+    
+    b<-subset(colnames(cna.cl),str_detect(colnames(cna.cl), "loss*") )
+    cna.cl<-cna.cl[,colnames(cna.cl) %in% b | colnames(cna.cl)=="X"] #kEEP JUST THE LOSS ONES
+    cna.cl<-cna.cl[!duplicated(cna.cl$X),]
+    cna.cl<-cna.cl[!is.na(cna.cl$X),]
+    rownames(cna.cl)<-cna.cl[,1]
+    cna.cl<-cna.cl[,-1]
+    cna.cl<-t(cna.cl)
+    
+    return(list(cna.cl,cna.tum))
+  }
+  
+  if (typecfes=="MET"){
+    
+    
+    met.info=read.xlsx("/g/strcombio/fsupek_home/bfito/METinfo.xlsx",header=T,1,startRow = 17) #MET info to match the region to a gene
+    
+    specialtypes=c("LGG+GBM","LUSC+LUAD","OV+UCEC","HNSC+LUSC")
+    
+    tissuepathmet=as.character(paste(tissuename,".txt",sep=""))
+    if(!file.exists(paste("/g/strcombio/fsupek_home/bfito/METH_TUMOURS_BEMs/",tissuepathmet,sep=""))){tissabort("Tiss!METCFESTUM")}
+    met.tum=read.table(paste("/g/strcombio/fsupek_home/bfito/METH_TUMOURS_BEMs/",tissuepathmet,sep=""),sep = "\t", header = T)
+    met.cl=read.table(paste("/g/strcombio/fsupek_home/bfito/METH_CELLLINES_BEMs/",tissuepathmet,sep=""),sep = "\t", header = T)
+    
+    if(tissuename %in% specialtypes){
+      s<-strsplit(tissuename, "\\+")
+      tissuename1=s[[1]][1]
+      tissuename2=s[[1]][2]
+      met.tiss.info1=subset(met.info, met.info$Cancer.Types==tissuename1 & met.info$Genomic.Coordinates %in% rownames(met.tum))
+      met.tiss.info2=subset(met.info, met.info$Cancer.Types==tissuename2 & met.info$Genomic.Coordinates   %in%  rownames(met.tum))
+      met.tiss.info=rbind(met.tiss.info1,met.tiss.info2)
+      met.tiss.info=met.tiss.info[match(rownames(met.tum),met.tiss.info$Genomic.Coordinates),]
+      rownames(met.tum)<-met.tiss.info$GN
+      
+      colnames(met.tum) = gsub("\\.", "-", colnames(met.tum))
+      colnames(met.tum) = gsub("(TCGA-..-....)-.*", "\\1", colnames(met.tum))
+      
+      colnames(met.tum) = gsub("-[0-9][0-9]$", "", colnames(met.tum));
+      colnames(met.tum) = gsub("-.[0-9][0-9].$", "", colnames(met.tum));
+      colnames(met.tum) = gsub("-[0-9][0-9].$", "", colnames(met.tum))
+      colnames(met.tum) = gsub("-[0-9][0-9].$", "", colnames(met.tum))
+      
+      met.tiss.infocl1=subset(met.info, met.info$Cancer.Types==tissuename1 & met.info$Genomic.Coordinates %in% rownames(met.cl))
+      met.tiss.infocl2=subset(met.info, met.info$Cancer.Types==tissuename2 & met.info$Genomic.Coordinates   %in%  rownames(met.cl))
+      met.tiss.infocl=rbind(met.tiss.infocl1,met.tiss.infocl2)
+      met.tiss.infocl=met.tiss.info[match(rownames(met.cl),met.tiss.info$Genomic.Coordinates),]
+      rownames(met.cl)<-met.tiss.info$GN
+      colnames(met.cl)<-gsub("^X", "", colnames(met.cl))
+    }
+    
+    else{
+      met.tiss.info=subset(met.info, met.info$Cancer.Types==tissuename & met.info$Genomic.Coordinates   %in% met.tum$X)
+      met.tiss.info=met.tiss.info[match(met.tum$X,met.tiss.info$Genomic.Coordinates),]
+      met.tum$X<-met.tiss.info$GN
+      
+      colnames(met.tum) = gsub("\\.", "-", colnames(met.tum))
+      colnames(met.tum) = gsub("(TCGA-..-....)-.*", "\\1", colnames(met.tum))
+      
+      colnames(met.tum) = gsub("-[0-9][0-9]$", "", colnames(met.tum));
+      colnames(met.tum) = gsub("-.[0-9][0-9].$", "", colnames(met.tum));
+      colnames(met.tum) = gsub("-[0-9][0-9].$", "", colnames(met.tum))
+      colnames(met.tum) = gsub("-[0-9][0-9].$", "", colnames(met.tum))
+      
+      rownames(met.tum)<-met.tum$X
+      met.tum<-met.tum[,-1]
+      
+      colnames(met.cl)<-gsub("^X", "", colnames(met.cl))
+      met.tiss.info.cl=subset(met.info, met.info$Cancer.Types==tissuename & met.info$Genomic.Coordinates %in% met.cl[,1])
+      met.tiss.info=met.tiss.info[match(met.cl[,1],met.tiss.info$Genomic.Coordinates),]
+      met.cl[,1]<-met.tiss.info.cl$GN
+      rownames(met.cl)<-met.cl[,1]
+      met.cl<-met.cl[,-1]
+    }
+    return(list(met.cl,met.tum))
+    
+  }
+  
+}
+# function
+calc_pvalue = function(redg,redp, iterations = 2000){
+  
+  # Merge them
+
+  # Merge them
+  redg$Predicted<-relevel(as.factor(redg$Predicted),ref="1")
+  model.pred.g<-glm(formula = value ~ as.factor(Predicted) + as.factor(gen_CFES) +as.factor(Predicted)*as.factor(gen_CFES),data = redg)
+  model.pred.g<-as.data.frame(summary(model.pred.g)$coefficients)
+  real_es_g = model.pred.g[rownames(model.pred.g)=="as.factor(Predicted)0:as.factor(gen_CFES)1",1]
+  
+  redp$Predicted<-relevel(as.factor(redp$Predicted),ref="1")
+  model.pred.p<-glm(formula = value ~ as.factor(Predicted) + as.factor(gen_CFES) +as.factor(Predicted)*as.factor(gen_CFES),data = redp)
+  model.pred.p<-as.data.frame(summary(model.pred.p)$coefficients)
+  real_es_p = model.pred.p[rownames(model.pred.p)=="as.factor(Predicted)0:as.factor(gen_CFES)1",1]
+  
+  real_score = mean(c(real_es_g, real_es_p))
+  abs_real_score = abs(real_score)
+  
+    
+    ran_score = rep(NA, iterations)
+
+
+    for(i in 1:iterations) {
+      redg2 = cbind(sample(redg$Predicted), redg[,7:9])
+      redp2 = cbind(sample(redp$Predicted), redp[,7:9])
+      colnames(redp2)[1]<-"Predicted"
+      colnames(redg2)[1]<-"Predicted"
+      
+      redg2$Predicted<-relevel(as.factor(redg2$Predicted),ref="1")
+      model.pred.g<-glm(formula = value ~ as.factor(Predicted) + as.factor(gen_CFES) +as.factor(Predicted)*as.factor(gen_CFES),data = redg2)
+      model.pred.g<-as.data.frame(summary(model.pred.g)$coefficients)
+      real_es_g2 = model.pred.g[rownames(model.pred.g)=="as.factor(Predicted)0:as.factor(gen_CFES)1",1]
+      
+      redp2$Predicted<-relevel(as.factor(redp2$Predicted),ref="1")
+      model.pred.p<-glm(formula = value ~ as.factor(Predicted) + as.factor(gen_CFES) +as.factor(Predicted)*as.factor(gen_CFES),data = redp2)
+      model.pred.p<-as.data.frame(summary(model.pred.p)$coefficients)
+      real_es_p2 = model.pred.p[rownames(model.pred.p)=="as.factor(Predicted)0:as.factor(gen_CFES)1",1]
+      
+      score = mean(c(real_es_g2, real_es_p2))
+      ran_score[i]= abs(score)
+    }
+    ran_score<-ran_score[!is.na(ran_score)]
+    pvalue = (sum(ran_score >= abs_real_score) + 1) / length(ran_score)
+    df_return1 = data.frame(cohend_x = ifelse(length(real_es_g)==0,NA,real_es_g), cohend_y = ifelse(length(real_es_p)==0,NA,real_es_p), 
+                           real_score = real_score, pvalue = pvalue,pvalue_x=ifelse(length(real_es_g)==0,NA,(sum(ran_score >= abs(real_es_g)) + 1) / length(ran_score)),pvalue_y=ifelse(length(real_es_p)==0,NA,(sum(ran_score >= abs(real_es_p)) + 1) / length(ran_score)), stringsAsFactors = F)
+    
+    
+    # Merge them
+    redg$Predicted<-relevel(as.factor(redg$Predicted),ref="1")
+    model.pred.g<-glm(formula = value ~ as.factor(Predicted) + as.factor(gen_CFES) +as.factor(Predicted)*as.factor(gen_CFES),data = redg)
+    model.pred.g<-as.data.frame(summary(model.pred.g)$coefficients)
+    real_es_g = model.pred.g[rownames(model.pred.g)=="as.factor(gen_CFES)1",1]
+    
+    redp$Predicted<-relevel(as.factor(redp$Predicted),ref="1")
+    model.pred.p<-glm(formula = value ~ as.factor(Predicted) + as.factor(gen_CFES) +as.factor(Predicted)*as.factor(gen_CFES),data = redp)
+    model.pred.p<-as.data.frame(summary(model.pred.p)$coefficients)
+    real_es_p = model.pred.p[rownames(model.pred.p)=="as.factor(gen_CFES)1",1]
+    
+    real_score = mean(c(real_es_g, real_es_p))
+    abs_real_score = abs(real_score)
+    
+    
+    ran_score = rep(NA, iterations)
+    
+    
+    for(i in 1:iterations) {
+      redg2 = cbind(sample(redg$Predicted), redg[,7:9])
+      redp2 = cbind(sample(redp$Predicted), redp[,7:9])
+      colnames(redp2)[1]<-"Predicted"
+      colnames(redg2)[1]<-"Predicted"
+      
+      redg2$Predicted<-relevel(as.factor(redg2$Predicted),ref="1")
+      model.pred.g<-glm(formula = value ~ as.factor(Predicted) + as.factor(gen_CFES) +as.factor(Predicted)*as.factor(gen_CFES),data = redg2)
+      model.pred.g<-as.data.frame(summary(model.pred.g)$coefficients)
+      real_es_g2 = model.pred.g[rownames(model.pred.g)=="as.factor(gen_CFES)1",1]
+      
+      redp2$Predicted<-relevel(as.factor(redp2$Predicted),ref="1")
+      model.pred.p<-glm(formula = value ~ as.factor(Predicted) + as.factor(gen_CFES) +as.factor(Predicted)*as.factor(gen_CFES),data = redp2)
+      model.pred.p<-as.data.frame(summary(model.pred.p)$coefficients)
+      real_es_p2 = model.pred.p[rownames(model.pred.p)=="as.factor(gen_CFES)1",1]
+      
+      score = mean(c(real_es_g2, real_es_p2))
+      ran_score[i]= abs(score)
+    }
+    ran_score<-ran_score[!is.na(ran_score)]
+    pvalue = (sum(ran_score >= abs_real_score) + 1) / length(ran_score)
+    df_return2 = data.frame(cohend_x_inter = ifelse(length(real_es_g)==0,NA,real_es_g), cohend_y_inter = ifelse(length(real_es_p)==0,NA,real_es_p), 
+                           real_score_inter = real_score, pvalue_inter = pvalue,pvalue_x_inter=ifelse(length(real_es_g)==0,NA,(sum(ran_score >= abs(real_es_g)) + 1) / length(ran_score)),pvalue_y_inter=ifelse(length(real_es_p)==0,NA,(sum(ran_score >= abs(real_es_p)) + 1) / length(ran_score)), stringsAsFactors = F)
+    
+    
+    return(cbind(df_return1,df_return2))
+
+} # end function
+
+
+# 1) LOAD DATA
+# A) Read features
+
+feat = read.table("/home/bfito/Scripts/Figures/Fig3/Probs_TUM_allCLs")
+metadata<-readxl::read_xlsx("/g/strcombio/fsupek_home/bfito/marinaIunput/Cell_Lines_Details.xlsx",sheet = 1)
+submeta<-subset(metadata,metadata$`COSMIC identifier` %in% feat$sample_id)
+colnames(submeta)[2]<-"sample_id"
+submeta<-submeta[,c(2,10)]
+feat= merge(feat, submeta, by.x = "sample_id", all = FALSE)
+
+
+feat$Predicted<-NA
+tresh1=0.93
+tresh2=0.55
+feat[feat$TP53==0 & feat$Probs_GE.tum>0.5 & feat$Probs_GE.tum<tresh2,]$Predicted<-0
+feat[feat$TP53==0 & feat$Probs_GE.tum>tresh2,]$Predicted<-1
+feat[feat$TP53==0 & feat$Probs_GE.tum>tresh1,]$Predicted<-0
+feat[feat$TP53==1 & feat$Probs_GE.tum>0.5,]$Predicted<-1
+feat[feat$TP53==0 & feat$Probs_GE.tum<0.5,]$Predicted<-0
+feat<-feat[!is.na(feat$Predicted),]
+feat$Predicted<-relevel(as.factor(feat$Predicted),ref="1")
+table(feat$Predicted)
+feat$Predicted
+
+# group tissues
+hn_lu = feat[feat$cancer_type %in% c("HNSC", "LUSC"),]
+hn_lu$cancer_type = "HNSC_LUSC"
+
+gb_lg = feat[feat$cancer_type %in% c("GBM", "LGG"),]
+gb_lg$cancer_type = "GBM_LGG"
+
+ov_uc = feat[feat$cancer_type %in% c("OV", "UCEC"),]
+ov_uc$cancer_type = "OV_UCEC"
+
+pa_co = feat[feat$cancer_type %in% c("PAAD", "COREAD"),]
+pa_co$cancer_type = "PAAD_COREAD"
+
+new_feat = dplyr::bind_rows(list(hn_lu, gb_lg, ov_uc, pa_co))
+feat = dplyr::bind_rows(feat, new_feat)
+
+# B) read drug/crispr responses
+# read GDSC
+gdsc = read_csv("/g/strcombio/fsupek_home/msalvadores/Documents/Review_Jurica/data/gdsc1-2_drug_response.csv")
+gdsc = gdsc[gdsc$DRUG_NAME == x_drug,]
+gdsc = gdsc[!is.na(gdsc$LN_IC50),]
+gdsc$DRUG_NAME = gsub(" ", "", gdsc$DRUG_NAME)
+
+# sel drug id with more samples
+
+freq = data.frame(table(gdsc$DRUG_ID))
+gdsc = gdsc[gdsc$DRUG_ID == freq$Var1[freq$Freq == max(freq$Freq)],]
+
+# if drug in GDSC2 and GDSC1 use GDSC1
+if (length(unique(gdsc$DATASET)) == 2){gdsc = gdsc[gdsc$DATASET == "GDSC1",]}
+gdsc = gdsc[,c("COSMIC_ID", "DRUG_NAME", "LN_IC50")]
+colnames(gdsc)[3] = "value"
+xmat = gdsc
+
+# read y axis value
+if(analysis == "prism"){
+  
+  #read PRISM drug response
+  pri = read_csv("/g/strcombio/fsupek_home/msalvadores/Documents/Review_Jurica/data/prism_drug_response.csv")
+  pri = pri[pri$name == tolower(y_drug) |pri$name == toupper(y_drug)|pri$name==y_drug ,]
+  pri = pri[!is.na(pri$ic50),]
+  pri$LN_IC50 = log(pri$ic50)
+  pri = pri[,c("COSMICID", "name", "LN_IC50")]
+  colnames(pri)[1] = "COSMIC_ID"
+  colnames(pri)[3] = "value"
+  ymat = pri
+  
+}else if(analysis == "pscore"){
+  
+  # read PSCORE crispr values
+  psco = read_csv("/g/strcombio/fsupek_home/msalvadores/Documents/Review_Jurica/data/pscore_achilles_comb_only_taget_genes.csv")
+  psco = psco[psco$gene == target,]
+  psco = psco[!is.na(psco$crispr_score),]
+  psco = psco[,c("COSMIC_ID", "gene", "crispr_score")]
+  colnames(psco)[3] = "value"
+  ymat = psco
+  
+}else if(analysis == "same_target"){
+  
+  # read GDSC for yaxis value
+  gdsc = read_csv("/g/strcombio/fsupek_home/msalvadores/Documents/Review_Jurica/data/gdsc1-2_drug_response.csv")
+  gdsc = gdsc[gdsc$DRUG_NAME == y_drug,]
+  gdsc = gdsc[!is.na(gdsc$LN_IC50),]
+  
+  # sel drug id with more samples
+  freq = data.frame(table(gdsc$DRUG_ID))
+  gdsc = gdsc[gdsc$DRUG_ID == freq$Var1[freq$Freq == max(freq$Freq)],]
+  
+  # if drug in GDSC2 and GDSC1 use GDSC1
+  if (length(unique(gdsc$DATASET)) == 2){gdsc = gdsc[gdsc$DATASET == "GDSC1",]}
+  gdsc = gdsc[,c("COSMIC_ID", "DRUG_NAME", "LN_IC50")]
+  colnames(gdsc)[3] = "value"
+  ymat = gdsc
+  
+}
+
+ymat = ymat[!duplicated(ymat$COSMIC_ID),]
+
+cfescl<-t(loadCFES(tissuename = "PANCAN",typecfes = "CGS")[[1]])
+cancer_types = unique(feat$cancer_type)
+res = lapply(cancer_types, function(ct){
+  
+print(ct)
+  feats=unique(colnames(cfescl))
+  feat_red = subset(feat,feat$cancer_type == ct )
+  redg = merge(feat_red, xmat, by.x = "sample_id", by.y = "COSMIC_ID", all = FALSE)
+  redp = merge(feat_red, ymat, by.x = "sample_id", by.y = "COSMIC_ID", all = FALSE)
+
+  
+  res2 = lapply(feats, function(fe){
+    print(fe)
+    if (fe=="TP53" ){return()}
+    cfesct<-cfescl[rownames(cfescl) %in% feat_red$sample_id,colnames(cfescl)==fe,drop=F]
+    redg[,"gen_CFES"]<-cfesct[match(redg$sample_id,rownames(cfesct))]
+    feat_x<-redg
+    redp[,"gen_CFES"]<-cfesct[match(redp$sample_id,rownames(cfesct))]
+    feat_y<-redp
+    redg<-redg[!is.na(redg$gen_CFES),]
+    redp<-redp[!is.na(redp$gen_CFES),]
+    feat_x<-feat_x[!is.na(feat_x$gen_CFES),]
+    feat_y<-feat_y[!is.na(feat_y$gen_CFES),]
+    if (sum(as.numeric(feat_x$gen_CFES))<2 | nrow(table(feat_x$gen_CFES))<2 | nrow(table(feat_y$gen_CFES))<2 | sum(as.numeric(feat_y$gen_CFES))<2){print("gen_cfes<2");return()}
+    if(!(length(unique(feat_x$Predicted)) == 2)| !(length(unique(feat_y$Predicted)) == 2)){print("gen_cfes<2");return()}
+    if(min(table(feat_x$Predicted)) >= 2 & min(table(feat_y$Predicted)) >= 2){
+      
+      df_res = calc_pvalue(redg=redg,redp=redp)
+      df_res$xaxis = x_drug
+      df_res$yaxis = y_drug
+      df_res$feat = fe
+      df_res$cancer_type = ct
+      return(df_res)
+    }
+    
+  }) # 2nd lapply
+  
+  fin = dplyr::bind_rows(res2)
+  fin = fin[!is.na(fin$real_score),]
+  return(fin)
+}) # 1st lapply
+
+total = dplyr::bind_rows(res)
+
+if(opt$analysis == "same_target"){
+  total$target = opt$target
+}
+
+path = paste0("/g/strcombio/fsupek_home/bfito/Scripts/Figures/Fig3/two_way/newcoef2022/ref1/Pred", opt$type, "_",opt$analysis, "_", as.character(opt$xaxis), "_", as.character(opt$yaxis), ".csv")
+write.csv(total, path, row.names = F)
+
