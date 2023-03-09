@@ -1,0 +1,466 @@
+
+
+
+list.of.packages <- c("Biobase","genefilter","DBI","RSQLite","biomaRt","labeling")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)>0){BiocManager::install(new.packages)}
+
+list.of.packages <- c("RSQLite","httr","openssl","curl","data.table")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)>0){install.packages(new.packages,dependencies = T,repos = 'http://cran.us.r-project.org')}
+
+suppressPackageStartupMessages(require(optparse)) # don't say "Loading required package: optparse"
+# manual: http://cran.r-project.org/web/packages/optparse/optparse.pdf
+# vignette: http://www.icesi.edu.co/CRAN/web/packages/optparse/vignettes/optparse.pdf
+
+option_list = list(
+  make_option(c("-G", "--gename"), action="store", default=NA, type='character',
+              help="gen name"))
+
+opt = parse_args(OptionParser(option_list=option_list))
+alpha=0.5
+type="GE"
+gename="TP53"
+typecfes="CGS"
+
+
+
+
+
+library(labeling)
+library(rpart)
+library(stringi)
+library(readr)
+library(matrixStats)
+library(xlsx)
+library(limma)
+library(ggplot2)
+library(sva)
+library(preprocessCore)
+library(tidyr)
+library(dplyr)
+library(formattable)
+library(ggpubr)
+library(optparse)
+library(glmnet)
+library(PRROC)
+library(biomaRt)
+library(lumi)
+library(stringr)
+
+
+matrix.X=fread("/g/strcombio/fsupek_home/bfito/marinaIunput/GE_13K_sqrt_both.csv")
+
+#Filtering Cancer types in CFEs
+prueba = matrix.X
+prueba$type[prueba$type != "TCGA"] = "CL"
+freq = as.data.frame(table(prueba$type, prueba$cancer_type))
+freq = tidyr::spread(freq, Var1, Freq)
+freq = freq[freq$TCGA >= 10 ,]
+remove(prueba)
+
+# reduce matrix.X
+matrix.X = matrix.X[matrix.X$cancer_type %in% freq$Var2,]
+matrix.X = matrix.X[matrix.X$cancer_type != "SARC",]
+
+
+
+#Translating IDs from STRIPcell/ACHILLES to COSMIC using Details cells lines file-> we just need to do it with CL
+metadata<-read.xlsx("/g/strcombio/fsupek_home/bfito/marinaIunput/Cell_Lines_Details.xlsx",sheetIndex = 1)
+metadata$Sample.Name = toupper(gsub("[-_\\(\\)]*", "", metadata$Sample.Name))
+metadata$Sample.Name = gsub("NCI", "", metadata$Sample.Name)
+table(matrix.X$sample_id %in% metadata$Sample.Name) #955 not mapped
+matrix.X[!matrix.X$sample_id %in% metadata$Sample.Name & !matrix.X$type=="TCGA",] #CL that do not map
+
+#Subtitution of every ID with CosmicID
+for (i in seq(1,nrow(matrix.X))){
+  if (matrix.X$sample_id[i]%in%metadata$Sample.Name)
+  {
+    samplemetadata<-metadata[metadata$Sample.Name==matrix.X$sample_id[i],]
+    matrix.X$sample_id[i]<-samplemetadata$COSMIC.identifier}
+}
+
+type2=paste("AUC_matrices_",paste(type,typecfes,sep="_"),sep="")
+
+mainDir<- paste("/g/strcombio/fsupek_home/bfito/",paste(type2,"/",sep=""),sep="")
+dir.create(mainDir, showWarnings = FALSE)
+
+#Initialice results matrix
+matrixAUC<-as.data.frame(matrix(NA,ncol= 13, nrow =0),stringsAsFactors = F)
+colnames(matrixAUC)<-c("Tissue","NºSamples-Tum","NºSamples-CL", "GenID","alpha","AUC-TCGA","AUPRC-TCGA","1-TCGA","0-TCGA","AUC-CL","AUPRC-CL","1-CL","0-CL")
+
+tissabort<-function(message){print(paste(message,tissuename));
+  quit()
+}
+
+
+target=normalize.quantiles.determine.target(x = t(as.matrix(matrix.X[matrix.X$type == 'TCGA',4:ncol(matrix.X)]))) #Target distribution for normalization -> we adjust by the samples that we know are the good ones, data of tumors (TCGA) are the one that we take as a reference. Matrix need to be transposed first
+
+matrix.X.n<-matrix.X
+
+matrix.X.n[,4:ncol(matrix.X.n)]<-t(normalize.quantiles.use.target(x = t(as.matrix(matrix.X.n[,4:ncol(matrix.X.n)])), target = target, copy=FALSE)) #transpose again for normal settings
+
+
+#Combat
+final<- cbind(matrix.X.n[,1:3], t(
+  ComBat(dat = t(matrix.X.n[,4:ncol(matrix.X.n)]), batch = matrix.X.n$type, mod = NULL) ))
+
+
+
+
+
+ge.cl = final[final$type != 'TCGA',]
+ge.tcga = final[final$type == 'TCGA',]
+
+
+remove(final)
+
+#ge.tcga<-cbind(ge.tcga[,1:3], t(ComBat(dat = t(ge.tcga[,4:ncol(ge.tcga)]), batch = ge.tcga$cancer_type, mod = NULL) ))
+#ge.cl<-cbind(ge.cl[,1:3], t(ComBat(dat = t(ge.cl[,4:ncol(ge.cl)]), batch = ge.cl$cancer_type, mod = NULL) ))
+
+#Loading Y data: CFES
+loadCFES<-function(tissuename,typecfes){
+  tissuename=tissuename
+  
+  if (typecfes=="CGS"){
+    tissuepathcgs=as.character(paste(tissuename,".txt",sep=""))
+    tissuepathcgscl=as.character(paste(tissuename,"_SEQ_BEM.txt",sep=""))
+    if(!file.exists(paste("/g/strcombio/fsupek_home/bfito/Data/CFEs CGS tumors/",tissuepathcgs,sep=""))){tissabort("Tiss!GCs")}
+    cgs.tum=read.table(paste("/g/strcombio/fsupek_home/bfito/Data/CFEs CGS tumors/",tissuepathcgs,sep=""), header = T)
+    cgs.cl=read.table(paste("/g/strcombio/fsupek_home/bfito/Data/CFEs CGS CLs/",tissuepathcgscl,sep=""), header = T)
+    colnames(cgs.tum) = gsub("\\.", "-", colnames(cgs.tum))
+    colnames(cgs.tum) = gsub("(TCGA-..-....)-.*", "\\1", colnames(cgs.tum))
+    rownames(cgs.tum)<-cgs.tum$CG
+    cgs.tum<-cgs.tum[,-1:-2,drop=F]
+    
+    colnames(cgs.cl)<-gsub("^X", "", colnames(cgs.cl))
+    rownames(cgs.cl)<-cgs.cl$CG
+    cgs.cl<-cgs.cl[,-1:-2,drop=F]
+    
+    return(list(cgs.cl,cgs.tum))
+    
+  }
+  
+  if (typecfes=="cnv"){
+    
+    cna.info=read.xlsx("/g/strcombio/fsupek_home/bfito/TableS2D.xlsx",header=T,1,startRow =19)#Table S2D-> to map each region of the cna to the genes that contain -> each region have several sothere is no point of just show 20 genes in a plot
+    
+    id.info=read.xlsx("/g/strcombio/fsupek_home/bfito/TableS1D.xlsx",header=T,1,startRow=10)
+    names<-c("","Patiend ID","Cancer type", "WES data","CNA","MET","Hyp","MS","WES_ID","CNA_ID","MET_ID")
+    colnames(id.info)<-names
+    
+    
+    tissuepathcna=as.character(paste(tissuename,"_CNA_BEM.rdata.txt",sep=""))
+    if(!file.exists(paste("/g/strcombio/fsupek_home/bfito/Tumours_cnv_BEMs/",tissuepathcna,sep=""))){tissabort("Tiss!cnv")}
+    cna.tum=read.table(paste("/g/strcombio/fsupek_home/bfito/Tumours_cnv_BEMs/",tissuepathcna,sep=""),sep = "\t", header = T)
+    cna.cl=read.table(paste("/g/strcombio/fsupek_home/bfito/CellLine_cnv_BEMs/",tissuepathcna,sep=""),sep = "\t", header = T)
+    
+    cna.tum$X <- id.info$`Patiend ID`[match(cna.tum$X, id.info$CNA_ID)]
+    a<-subset(colnames(cna.tum),str_detect(colnames(cna.tum), "loss*") )
+    cna.tum<-cna.tum[,colnames(cna.tum) %in% a | colnames(cna.tum)=="X"] #kEEP JUST THE LOSS ONES
+    cna.tum<-cna.tum[!duplicated(cna.tum$X),]
+    cna.tum<-cna.tum[!is.na(cna.tum$X),]
+    rownames(cna.tum)<-cna.tum[,1]
+    cna.tum<-cna.tum[,-1]
+    cna.tum<-t(cna.tum)
+    
+    b<-subset(colnames(cna.cl),str_detect(colnames(cna.cl), "loss*") )
+    cna.cl<-cna.cl[,colnames(cna.cl) %in% b | colnames(cna.cl)=="X"] #kEEP JUST THE LOSS ONES
+    cna.cl<-cna.cl[!duplicated(cna.cl$X),]
+    cna.cl<-cna.cl[!is.na(cna.cl$X),]
+    rownames(cna.cl)<-cna.cl[,1]
+    cna.cl<-cna.cl[,-1]
+    cna.cl<-t(cna.cl)
+    
+    return(list(cna.cl,cna.tum))
+  }
+  
+  if (typecfes=="MET"){
+    
+    
+    met.info=read.xlsx("/g/strcombio/fsupek_home/bfito/METinfo.xlsx",header=T,1,startRow = 17) #MET info to match the region to a gene
+    
+    specialtypes=c("LGG+GBM","LUSC+LUAD","OV+UCEC","HNSC+LUSC")
+    
+    tissuepathmet=as.character(paste(tissuename,".txt",sep=""))
+    if(!file.exists(paste("/g/strcombio/fsupek_home/bfito/METH_TUMOURS_BEMs/",tissuepathmet,sep=""))){tissabort("Tiss!METCFESTUM")}
+    met.tum=read.table(paste("/g/strcombio/fsupek_home/bfito/METH_TUMOURS_BEMs/",tissuepathmet,sep=""),sep = "\t", header = T)
+    met.cl=read.table(paste("/g/strcombio/fsupek_home/bfito/METH_CELLLINES_BEMs/",tissuepathmet,sep=""),sep = "\t", header = T)
+    
+    if(tissuename %in% specialtypes){
+      s<-strsplit(tissuename, "\\+")
+      tissuename1=s[[1]][1]
+      tissuename2=s[[1]][2]
+      met.tiss.info1=subset(met.info, met.info$Cancer.Types==tissuename1 & met.info$Genomic.Coordinates %in% rownames(met.tum))
+      met.tiss.info2=subset(met.info, met.info$Cancer.Types==tissuename2 & met.info$Genomic.Coordinates   %in%  rownames(met.tum))
+      met.tiss.info=rbind(met.tiss.info1,met.tiss.info2)
+      met.tiss.info=met.tiss.info[match(rownames(met.tum),met.tiss.info$Genomic.Coordinates),]
+      rownames(met.tum)<-met.tiss.info$GN
+      
+      colnames(met.tum) = gsub("\\.", "-", colnames(met.tum))
+      colnames(met.tum) = gsub("(TCGA-..-....)-.*", "\\1", colnames(met.tum))
+      
+      colnames(met.tum) = gsub("-[0-9][0-9]$", "", colnames(met.tum));
+      colnames(met.tum) = gsub("-.[0-9][0-9].$", "", colnames(met.tum));
+      colnames(met.tum) = gsub("-[0-9][0-9].$", "", colnames(met.tum))
+      colnames(met.tum) = gsub("-[0-9][0-9].$", "", colnames(met.tum))
+      
+      met.tiss.infocl1=subset(met.info, met.info$Cancer.Types==tissuename1 & met.info$Genomic.Coordinates %in% rownames(met.cl))
+      met.tiss.infocl2=subset(met.info, met.info$Cancer.Types==tissuename2 & met.info$Genomic.Coordinates   %in%  rownames(met.cl))
+      met.tiss.infocl=rbind(met.tiss.infocl1,met.tiss.infocl2)
+      met.tiss.infocl=met.tiss.info[match(rownames(met.cl),met.tiss.info$Genomic.Coordinates),]
+      rownames(met.cl)<-met.tiss.info$GN
+      colnames(met.cl)<-gsub("^X", "", colnames(met.cl))
+    }
+    
+    else{
+      met.tiss.info=subset(met.info, met.info$Cancer.Types==tissuename & met.info$Genomic.Coordinates   %in% met.tum$X)
+      met.tiss.info=met.tiss.info[match(met.tum$X,met.tiss.info$Genomic.Coordinates),]
+      met.tum$X<-met.tiss.info$GN
+      
+      colnames(met.tum) = gsub("\\.", "-", colnames(met.tum))
+      colnames(met.tum) = gsub("(TCGA-..-....)-.*", "\\1", colnames(met.tum))
+      
+      colnames(met.tum) = gsub("-[0-9][0-9]$", "", colnames(met.tum));
+      colnames(met.tum) = gsub("-.[0-9][0-9].$", "", colnames(met.tum));
+      colnames(met.tum) = gsub("-[0-9][0-9].$", "", colnames(met.tum))
+      colnames(met.tum) = gsub("-[0-9][0-9].$", "", colnames(met.tum))
+      
+      rownames(met.tum)<-met.tum$X
+      met.tum<-met.tum[,-1]
+      
+      colnames(met.cl)<-gsub("^X", "", colnames(met.cl))
+      met.tiss.info.cl=subset(met.info, met.info$Cancer.Types==tissuename & met.info$Genomic.Coordinates %in% met.cl[,1])
+      met.tiss.info=met.tiss.info[match(met.cl[,1],met.tiss.info$Genomic.Coordinates),]
+      met.cl[,1]<-met.tiss.info.cl$GN
+      rownames(met.cl)<-met.cl[,1]
+      met.cl<-met.cl[,-1]
+    }
+    return(list(met.cl,met.tum))
+    
+  }
+  
+}
+
+cfes<-loadCFES("PANCAN","CGS")
+
+cfes.cl<-as.data.frame(cfes[[1]])
+cfes.tum<-as.data.frame(cfes[[2]])
+
+
+
+
+#Filtering Y CFES that appear in X samples
+
+if(type=="GE"){ge.tcga$sample_id = gsub("-[0-9][0-9].$", "", ge.tcga$sample_id)}
+
+
+
+
+
+#Running glmnet to fit a model to our data
+fitglmnet<-function(Ymatrix,Xmatrix,alpha){
+  fraction <-table(Ymatrix)/length(Ymatrix)
+  weights <-1-fraction[as.factor(Ymatrix)]
+  fit = cv.glmnet(x = Xmatrix,y = as.factor(Ymatrix),family= 'binomial', alpha =alpha, type.measure = 'auc', weights = weights, nfolds = 5) 
+  return(fit)
+}
+
+
+
+
+
+
+
+
+
+
+sel_cfes.tum = read.table("/home/bfito/Scripts/Figures/Fig1/tcga_tp53_lab")
+remove<-read.table("TP53_deletedphenos_0.5")
+remove2<-read.table("TP53_deletedpred0_0.5")
+colnames(remove)[1]<-"sample_id"
+colnames(remove2)[1]<-"sample_id"
+ sel_cfes.tum<-sel_cfes.tum[!sel_cfes.tum$sample_id %in% remove$sample_id & !sel_cfes.tum$sample_id %in% remove2$sample_id,]
+sel_cfes.cl = cbind(data.frame(sample_id = colnames(cfes.cl), stringsAsFactors = F), t(cfes.cl))
+sel_cfes.cl = sel_cfes.cl[,c("sample_id", gename)]
+
+
+
+data.tum = merge(sel_cfes.tum, ge.tcga, by = "sample_id", all=F)
+data.cl = merge(sel_cfes.cl, ge.cl, by = "sample_id", all= F)
+
+
+
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000141510"]
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000141510"]
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000198625"]
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000135679"]
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000170836"]
+
+data.tum<-data.tum[,!colnames(data.tum)=="ENSG00000141510"]
+data.tum<-data.tum[,!colnames(data.tum)=="ENSG00000198625"]
+data.tum<-data.tum[,!colnames(data.tum)=="ENSG00000135679"]
+data.tum<-data.tum[,!colnames(data.tum)=="ENSG00000170836"]
+
+
+
+
+
+remove(cl.test.cfes)
+remove(cfes)
+remove(metadata)
+
+
+a<-read.csv("/home/bfito/CCLE_gene_cn.csv")
+colnames(a)[1]<-"DepMap_ID"
+info<-read.csv("/home/bfito/Data/sample_info.csv")
+cl_cnv<-a[,c("MDM4..4194.","MDM2..4193.","PPM1D..8493.","TP53..7157.","DepMap_ID")]
+cl_cnv<-merge(info[,c(1,6)],cl_cnv,by="DepMap_ID")
+
+ggplot(cl_cnv, aes(x =cl_cnv$"MDM4..4194.")) +
+  geom_density()
+
+
+mixmdl <- normalmixEM(cl_cnv$MDM4..4194.)
+
+data.frame(x = mixmdl$x) %>%
+  ggplot() +
+  geom_histogram(aes(x, ..density..), binwidth = 0.05, colour = "black", 
+                 fill = "white") +
+  stat_function(geom = "line", fun = plot_mix_comps,
+                args = list(mixmdl$mu[1], mixmdl$sigma[1], lam = mixmdl$lambda[1]),
+                colour = "red", lwd = 1.5) +
+  stat_function(geom = "line", fun = plot_mix_comps,
+                args = list(mixmdl$mu[2], mixmdl$sigma[2], lam = mixmdl$lambda[2]),
+                colour = "blue", lwd = 1.5) +
+  ylab("Density")+theme_pubr()+xlab("MDM4")
+
+
+out_cl<-subset(cl_cnv,cl_cnv$MDM4..4194.>1.1| cl_cnv$MDM2..4193.>1.1| cl_cnv$PPM1D..8493.>1.1)
+
+
+
+gistic2_tresh<-read.table("/home/bfito/TP53_Probabilities/Combined_CNV_Gistic2_tresholded")
+colnames(gistic2_tresh)[2:6]<-paste0(colnames(gistic2_tresh)[2:6],"_CNV")
+gistic2_tresh<-merge(sel_cfes.tum,gistic2_tresh,by="sample_id")
+all_copycfes_0<-subset(gistic2_tresh,gistic2_tresh$TP53==0)
+out_tum<-subset(all_copycfes_0,all_copycfes_0$MDM2>0| all_copycfes_0$MDM4>0|all_copycfes_0$PPM1D>0)
+
+
+data.tum_out<-data.tum[data.tum$sample_id %in% out_tum$sample_id & data.tum$TP53==0,]
+data.cl_out<-data.cl[data.cl$sample_id %in% out_cl$COSMICID & data.cl$TP53==0,]
+
+data.cl<-data.cl[data.cl$cancer_type!="LGG",]
+data.cl<-data.cl[data.cl$cancer_type!="GBM",]
+data.tum<-data.tum[data.tum$cancer_type!="LGG",]
+data.tum<-data.tum[data.tum$cancer_type!="GBM",]
+
+data.tum<-data.tum[!data.tum$sample_id %in% data.tum_out$sample_id ,]
+data.cl<-data.cl[!data.cl$sample_id %in% data.cl_out$sample_id,]
+###################################TUM->CL  GE  #####################################3
+data.tum$TP53<- relevel(as.factor(data.tum$TP53), ref = "0")
+data.cl$TP53<- relevel(as.factor(data.cl$TP53), ref = "0")
+
+library(caret)
+library(PRROC)
+rownames(data.cl)<-data.cl$sample_id
+rownames(data.cl_out)<-data.cl_out$sample_id
+foldmatrix<-matrix(ncol=2)
+out_matrix<-matrix(data = rownames(data.cl_out),nrow = nrow(data.cl_out))
+###CL TO CL
+getallclprobs<-function(){
+  for (i in seq(1,k)){
+  tr = data.cl[-flds[[i]],]
+  test = data.cl[flds[[i]],]
+  fraction <-table(tr[,2])/length(tr[,2])
+  weights <-1-fraction[as.factor(tr[,2])]
+  lambda = cv.glmnet(x = as.matrix(tr[,5:ncol(tr)]),
+                     y = as.factor(tr[,2]),
+                     family= 'binomial',type.measure = "auc", weights = as.vector(unlist(weights)),
+                     alpha =0.5,
+                     nfolds = 4)
+  print(lambda$cvm[which(lambda$lambda==lambda$lambda.min)]) 
+  lambda=lambda$lambda.min
+  
+  fit=glmnet(x = as.matrix(tr[,5:ncol(tr)]),
+             y = as.factor(tr[,2]),
+             family= 'binomial',alpha = 0.5,
+             weights = as.vector(unlist(weights)),lambda = lambda)
+
+  predic<-predict(fit,type="response", 
+                  newx = as.matrix(test[,5:ncol(test)]), s = lambda)
+  foldmatrix<-rbind(cbind(rownames(predic),predic),foldmatrix)
+  
+  if(nrow(data.cl_out)!=0){
+    predic<-predict(fit,type="response", 
+                    newx = as.matrix(data.cl_out[,5:ncol(data.cl_out)]), s =lambda)
+    out_matrix<-cbind(out_matrix,predic)}
+}
+  
+  probs_cl<-foldmatrix
+  
+  if(nrow(data.cl_out)!=0){
+    rownames(out_matrix)<-out_matrix[,1]
+    storage.mode(out_matrix)<-"numeric"
+    out_matrix[,2]<-rowMeans(out_matrix[,2:ncol(out_matrix)])
+    out_matrix[,1]<-rownames(out_matrix)
+    probs_cl<-rbind(foldmatrix,out_matrix[,1:2])
+  }}
+
+k=3
+flds <- createFolds(data.cl[,2], k =k, list = T, returnTrain =F)
+rownames(data.cl)<-data.cl$sample_id
+rownames(data.cl_out)<-data.cl_out$sample_id
+out_matrix<-matrix(data = rownames(data.cl_out),nrow = nrow(data.cl_out))
+foldmatrix<-matrix(ncol=2)
+
+probs_cl<-replicate(8,expr = getallclprobs(),simplify = F)
+probs_cl_all<-cbind(probs_cl[[1]],probs_cl[[2]],probs_cl[[3]],probs_cl[[4]],probs_cl[[5]],probs_cl[[6]],probs_cl[[7]],probs_cl[[8]])
+storage.mode(probs_cl_all)<-"numeric"
+probs_cl<-as.matrix(rowMeans(probs_cl_all[,c(2,4,6,8,10,12,14,16)]))
+probs_cl<-cbind(rownames(probs_cl),probs_cl)
+#####TUM TO CL
+
+probs_tum_cl<-list()
+a=0
+for (i in seq(1,5)){
+  a=a+1
+  tr = data.tum
+  fraction <-table(tr[,2])/length(tr[,2])
+  weights <-1-fraction[as.factor(tr[,2])]
+  lambda = cv.glmnet(x = as.matrix(tr[,5:ncol(tr)]),
+                     y = as.factor(tr[,2]),
+                     family= 'binomial',type.measure = "auc", weights = as.vector(unlist(weights)),
+                     alpha =1,
+                     nfolds = 5)
+  print(lambda$cvm[which(lambda$lambda==lambda$lambda.min)]) 
+  lambda=lambda$lambda.min
+  
+  fit=glmnet(x = as.matrix(tr[,5:ncol(tr)]),
+             y = as.factor(tr[,2]),
+             family= 'binomial',alpha = 1,
+             weights = as.vector(unlist(weights)),lambda = lambda)
+  
+  #lambda_fit<-fit$lambda[which.min(abs(lambda -fit$lambda))]
+  predic<-predict(fit,type="response", 
+                  newx = as.matrix(data.cl[,5:ncol(data.cl)]), s = lambda)
+  predic2<-predict(fit,type="response", 
+                    newx = as.matrix(data.cl_out[,5:ncol(data.cl_out)]), s =lambda)
+  probs_tum_cl[[a]]<-rbind(predic,predic2)
+
+}
+
+
+
+
+
+probsGE.tum<-probs_tum_cl[[1]]#are every apporeach equal in scores
+probsGE.tum$sample_id<-rownames(probsGE.tum_out)
+
+probsGE.tum<-rbind(probsGE.tum_out,probsGE.tum)
+colnames(probsGE.tum)<-c("Probability_GE.tum","sample_id")
+
+write.table(probs_cl,"/home/bfito/Scripts/Figures/Fig1/probs_noLGGGBM_noMDM*_NoCNV>1.1_CL_cl")
+write.table(probsGE.tum,"/home/bfito/Scripts/Figures/Fig1/probs_noLGGGBM_noMDM*_NoCNV>1.1_TUM_cl")
+
+
