@@ -1,0 +1,618 @@
+#FIGURE 1
+
+
+
+#A)
+#1.MATRIX IMAGE FROM PS/WEB + EXPLANATION
+
+#2.AUC
+
+#AUC score Tumors
+library(caret)
+#LOAD COMBATED + NORMALIZED + SQRTED GE
+GE.TUM<-as.data.frame(data.table::fread("/home/bfito/Scripts/Figures/Fig1/all_GE_tums"))
+data.tum<-GE.TUM
+data.tum<-data.tum[,-1]
+remove(GE.TUM)
+sel_cfes.tum = read.table("/home/bfito/Scripts/Figures/Fig1/tcga_tp53_lab")
+data.tum<-merge(sel_cfes.tum,data.tum,by="sample_id")
+data.tum<-data.tum[!duplicated(data.tum$sample_id),]
+
+data.tum<-data.tum[,!colnames(data.tum)=="ENSG00000141510"]
+data.tum<-data.tum[,!colnames(data.tum)=="ENSG00000198625"]
+data.tum<-data.tum[,!colnames(data.tum)=="ENSG00000135679"]
+data.tum<-data.tum[,!colnames(data.tum)=="ENSG00000170836"]
+
+gistic2_tresh<-read.table("/home/bfito/TP53_Probabilities/Combined_CNV_Gistic2_tresholded")
+colnames(gistic2_tresh)[2:6]<-paste0(colnames(gistic2_tresh)[2:6],"_CNV")
+gistic2_tresh<-merge(sel_cfes.tum,gistic2_tresh,by="sample_id")
+all_copycfes_0<-subset(gistic2_tresh,gistic2_tresh$TP53==0)
+all_copycfes_0$PPM1D_CNV<-as.numeric(as.character(all_copycfes_0$PPM1D_CNV))
+all_copycfes_0$MDM2_CNV<-as.numeric(as.character(all_copycfes_0$MDM2_CNV))
+all_copycfes_0$TP53_CNV<-as.numeric(as.character(all_copycfes_0$TP53_CNV))
+all_copycfes_0$MDM4_CNV<-as.numeric(as.character(all_copycfes_0$MDM4_CNV))
+
+out_tum<-all_copycfes_0[all_copycfes_0$MDM2_CNV>0| all_copycfes_0$MDM4_CNV>0|all_copycfes_0$PPM1D_CNV>0|all_copycfes_0$TP53_CNV<(-1),]
+
+data.tum_out<-data.tum[(data.tum$sample_id %in% out_tum[out_tum$TP53==0,]$sample_id),]
+data.tum_out<-data.tum_out[!duplicated(data.tum_out$sample_id),]
+data.tum<-data.tum[!data.tum$sample_id %in% data.tum_out$sample_id,]
+
+
+
+data.tum$cancer_type<-as.factor(data.tum$cancer_type)
+
+library(ggpubr)
+library(glmnet)
+library(pROC)
+
+flds <- createFolds(data.tum[,2], k =5, list = T, returnTrain =F)
+tr<-data.tum[-flds[[3]],]
+test<-data.tum[flds[[3]],]
+fraction <-table(tr[,2])/length(tr[,2])
+weights <-fraction[as.factor(tr[,2])]
+fit = cv.glmnet(x = data.matrix(tr[,c(3,5:ncol(tr))]),
+                y = as.factor(tr[,2]),
+                family= 'binomial',type.measure = "auc", weights = (weights),
+                alpha =0.5,
+                nfolds = 5)
+
+
+a<-as.data.frame(as.matrix(coefficients(fit)))
+a<-cbind(rownames(a),a)
+a<-as.data.frame(a[!a$`1`==0,])
+cat(as.character(a$`rownames(a)`),sep="\n")
+print(max(fit$cvm))
+
+a<-as.data.frame(as.matrix(coefficients(fit)))
+a<-cbind(rownames(a),a)
+a<-a[a$`1`!=0,]
+cat(rownames(a),sep="\n")
+
+dftum_test<-roc.glmnet(object = fit,newx =  data.matrix(test[,c(3,5:ncol(test))]),newy = as.factor(test$TP53))
+probs_tum_test<-as.data.frame(predict(fit,type="response", 
+                                      newx = data.matrix(test[,c(3,5:ncol(test))]), s = "lambda.min"))
+
+
+
+
+dftr<-roc.glmnet(object = fit,newx =  data.matrix(tr[,c(3,5:ncol(tr))]),newy = as.factor(tr$TP53))
+probs_tum_tr<-as.data.frame(predict(fit,type="response", 
+                                      newx = data.matrix(tr[,c(3,5:ncol(tr))]), s = "lambda.min"))
+
+
+
+ggplot(dftr,aes(FPR,TPR))+
+  geom_line(data=dftum_test,size = 0.85, alpha = 1,aes(color=paste0("Testing (AUROC= ",as.character(round(digits = 3,auc(test$TP53,probs_tum_test$`1`)[[1]])),")")))+ 
+  geom_line(data = dftr,size = 0.85, alpha = 1,aes(color=paste0("Trainning (AUROC= ",as.character(round(digits = 3,auc(tr$TP53,probs_tum_tr$`1`)[[1]])),")")))+theme_linedraw()+
+  labs( 
+       x = "False Positive Rate", 
+       y = "True Positive")+theme(text = element_text(size = 12),legend.position = "bottom",legend.box.just = "top",legend.title=element_blank())+scale_color_manual(values = c("tomato","orange"))+  theme(text=element_text(size=12))
+
+
+#AUC score CL
+
+
+
+GE.CL<-as.data.frame(data.table::fread("/home/bfito/Scripts/Figures/Fig3/GE_all_CL_newlabs"))
+GE.CL<-GE.CL[,-1]
+data.cl<-GE.CL
+
+a<-read.csv("/home/bfito/CCLE_gene_cn.csv")
+colnames(a)[1]<-"DepMap_ID"
+info<-read.csv("/home/bfito/Data/sample_info.csv")
+cl_cnv<-a[,c("USP7..7874.","ATM..472.","CHEK2..11200.","USP28..57646.","CNOT2..4848.","YEATS4..8089.","MDM4..4194.","MDM2..4193.","PPM1D..8493.","TP53..7157.","DepMap_ID")]
+cl_cnv<-merge(info[,c(1,6)],cl_cnv,by="DepMap_ID")
+colnames(cl_cnv)[2]<-"sample_id"
+ggplot(cl_cnv, aes(x =cl_cnv$MDM2..4193.)) +
+  geom_density()
+
+
+
+out_cl<-cl_cnv[cl_cnv$MDM4..4194.>1.5| cl_cnv$MDM2..4193.>1.5| cl_cnv$PPM1D..8493.>1.5|cl_cnv$TP53..7157.<0.5,]
+
+
+
+data.cl$TP53<- relevel(as.factor(data.cl$TP53), ref = "0")
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000141510"]
+
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000198625"]
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000135679"]
+data.cl<-data.cl[,!colnames(data.cl)=="ENSG00000170836"]
+
+probs_cl<-as.data.frame(predict(fit,type="response", 
+                                 newx = data.matrix(data.cl[,c(3,4:ncol(data.cl))]), s = "lambda.min"))
+auc(data.cl$TP53,probs_cl$`1`)
+
+dfcl<-roc.glmnet(object = fit,newx =  data.matrix(data.cl[,c(3,4:ncol(data.cl))]),newy = as.factor(data.cl$TP53))
+
+
+ggplot(dfcl,aes(FPR,TPR))+ geom_line(size = 0.5, alpha = 1,aes(color=paste0("Testing (AUCROC= ",as.character(round(digits = 3,auc(data.cl$TP53,probs_cl$`1`)[[1]])),")")))+theme_linedraw()+
+  labs(title= "ROC curve",subtitle = "Tumor classifier applied to CL", 
+       x = "False Positive Rate", 
+       y = "True Positive")+theme(legend.position = "bottom",legend.box.just = "top",legend.title=element_blank())+scale_color_manual(values = c("lightblue","orange"))
+ggsave("Scripts/Figures/Outline/Fig1/AUC_cl.png",device = "png")
+
+
+#3.FDR colored by TP53 muts
+
+#TUMORS
+library(caret)
+
+probs<-read.table("/home/bfito/Scripts/Figures/Fig1/probs_noLGGGBM_noMDM*_NoCNV>0_TCGAlabs")
+
+fdr_matrix<-matrix(NA,nrow=nrow(probs),ncol=4)
+for (i in seq(1,nrow(probs))){
+  tresh=probs[i,3]
+  
+  conf<-confusionMatrix(factor(ifelse(probs$Prob>tresh,1,0),levels = c(0,1)),reference=factor(probs$TP53,c(0,1)))$table
+  
+  tp<-conf[2,2]
+  fp<-conf[2,1]
+  
+  fdr<-fp/(tp+fp)
+  
+  fdr_matrix[i,]<-c(as.character(probs[i,1]),probs[i,2],fdr,tresh)
+  
+  
+  
+  
+}
+colnames(fdr_matrix)<-c("sample_id","Prob_GE.tum","FDR","tresh")
+fdr_matrix<-as.data.frame(fdr_matrix)
+
+fdr_matrix$tresh<-as.numeric(as.character(fdr_matrix$tresh))
+fdr_matrix$FDR<-as.numeric(as.character(fdr_matrix$FDR))
+gistic2_tresh<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUM_nottresholded")
+gistic2_tresh2<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUMS_MDM2_cophenos_not_tresholded")
+cnv_tum<-merge(gistic2_tresh,gistic2_tresh2[,-2],by="sample_id")
+colnames(cnv_tum)[2:10]<-paste0(colnames(cnv_tum)[2:10],"_CNV")
+fdr_matrix<-merge(fdr_matrix,cnv_tum,by="sample_id")
+fdr_matrix<-merge(fdr_matrix,probs[,c(1,4)],by="sample_id")
+fdr_matrix$TP53<-as.factor(fdr_matrix$TP53)
+ggplot(fdr_matrix,aes(x=tresh,y=FDR,color=TP53))+geom_point(size=0.5,alpha=0.3)+
+  theme_minimal()+geom_hline(yintercept = 0.59,alpha=0.2,linetype = "dashed")+scale_colour_manual(values = c("deepskyblue2","darkorange"))+xlab("Treshold")+
+  geom_linerange(data = fdr_matrix[fdr_matrix$MDM4_CNV>2&fdr_matrix$TP53==0,],aes(x=tresh, ymax=1, ymin=0.9),alpha=1,color="#3C5488B2")+
+  geom_linerange(data = fdr_matrix[fdr_matrix$MDM2_CNV>2 &fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.9, ymin=0.8),alpha=1,color="#4DBBD5B2")+
+  geom_linerange(data = fdr_matrix[fdr_matrix$PPM1D_CNV>2&fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.8, ymin=0.7),alpha=0.7,color="#00A087B2")+
+  geom_linerange(data = fdr_matrix[(fdr_matrix$TP53_CNV)<=(-1) &fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.7, ymin=0.6),alpha=1,color="#E64B35B2")+ylab("FDR")+ scale_x_continuous(breaks=seq(0,1,0.1))+theme(text=element_text(size=11,  family="Helvetica"))
+ggsave("Scripts/Figures/Outline/Fig1/FDR_tums.png",device = "png")
+
+
+#improvbed tum fdr
+
+library(caret)
+
+probs<-read.table("/home/bfito/Scripts/Figures/Fig1/probs_noLGGGBM_noMDM*_NoCNV>0_TCGAlabs")
+gistic2_tresh<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUM_nottresholded")
+gistic2_treshnot<-read.table("/home/bfito/TP53_Probabilities/Combined_CNV_Gistic2_tresholded")
+gistic2_tresh2<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUMS_MDM2_cophenos_not_tresholded")
+gistic2_tresh<-merge(gistic2_tresh,gistic2_tresh2[,-2],by="sample_id")
+colnames(gistic2_tresh)[2:10]<-paste0(colnames(gistic2_tresh)[2:10],"_CNV")
+prob_matrix_pan<-merge(probs,gistic2_tresh,by="sample_id")
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV>0.8|prob_matrix_pan$PPM1D_CNV>0.9|prob_matrix_pan$MDM4_CNV>0.9|prob_matrix_pan$TP53_CNV<(-1),]$TP53<-1
+probs<-prob_matrix_pan
+fdr_matrix<-matrix(NA,nrow=nrow(probs),ncol=4)
+for (i in seq(1,nrow(probs))){
+  tresh=probs[i,3]
+  
+  conf<-confusionMatrix(factor(ifelse(probs$Prob>tresh,1,0),levels = c(0,1)),reference=factor(probs$TP53,c(0,1)))$table
+  
+  tp<-conf[2,2]
+  fp<-conf[2,1]
+  
+  fdr<-fp/(tp+fp)
+  
+  fdr_matrix[i,]<-c(as.character(probs[i,1]),probs[i,3],fdr,tresh)
+  
+  
+  
+  
+}
+colnames(fdr_matrix)<-c("sample_id","Prob_GE.tum","FDR","tresh")
+fdr_matrix<-as.data.frame(fdr_matrix)
+
+fdr_matrix$tresh<-as.numeric(as.character(fdr_matrix$tresh))
+fdr_matrix$FDR<-as.numeric(as.character(fdr_matrix$FDR))
+
+
+gistic2_tresh<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUM_nottresholded")
+gistic2_tresh2<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUMS_MDM2_cophenos_not_tresholded")
+cnv_tum<-merge(gistic2_tresh,gistic2_tresh2[,-2],by="sample_id")
+colnames(cnv_tum)[2:10]<-paste0(colnames(cnv_tum)[2:10],"_CNV")
+
+fdr_matrix<-merge(fdr_matrix,cnv_tum,by="sample_id")
+fdr_matrix<-merge(fdr_matrix,read.table("/home/bfito/Scripts/Figures/Fig1/probs_noLGGGBM_noMDM*_NoCNV>0_TCGAlabs")[,c(1,4)],by="sample_id")
+fdr_matrix$TP53<-as.factor(fdr_matrix$TP53)
+
+ggplot(fdr_matrix,aes(x=tresh,y=FDR,color=TP53))+geom_point(data=fdr_matrix[fdr_matrix$TP53==0,],size=0.5,alpha=0.1,shape=16)+geom_point(data=fdr_matrix[fdr_matrix$TP53==1,],shape=16,size=0.5,alpha=0.3)+geom_hline(yintercept = 0.59,alpha=0.2,linetype = "dashed")+scale_colour_manual(values = c("deepskyblue2","darkorange"))+xlab("Treshold")+
+  geom_linerange(data = fdr_matrix[fdr_matrix$MDM4_CNV>2&fdr_matrix$TP53==0,],aes(x=tresh, ymax=1, ymin=0.9),alpha=0.5,color="#3C5488B2")+
+  geom_linerange(data = fdr_matrix[fdr_matrix$MDM2_CNV>2 &fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.9, ymin=0.8),alpha=0.5,color="#4DBBD5B2")+
+  geom_linerange(data = fdr_matrix[fdr_matrix$PPM1D_CNV>2&fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.8, ymin=0.7),alpha=0.5,color="#00A087B2")+theme_minimal()+
+  geom_linerange(data = fdr_matrix[(fdr_matrix$TP53_CNV)<=(-1) &fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.7, ymin=0.6),alpha=0.5,color="#E64B35B2")+ylab("FDR")+ scale_x_continuous(breaks=seq(0,1,0.2))+theme(axis.text.x = element_text( colour = c(rep("black",3),"red","black","black")),legend.position = "none",axis.text.y = element_text(color="black"),text=element_text(size=12, colour="black"))+ guides(colour = guide_legend(override.aes = list(size=3)))
+
+
+#recall
+fdr_matrix<-matrix(NA,nrow=nrow(probs),ncol=4)
+for (i in seq(1,nrow(probs))){
+  tresh=probs[i,3]
+  
+  conf<-confusionMatrix(factor(ifelse(probs$Prob>tresh,1,0),levels = c(0,1)),reference=factor(probs$TP53,c(0,1)))$table
+  
+  tp<-conf[2,2]
+  fp<-conf[2,1]
+  fn<-conf[1,2]
+  tn<-conf[1,1]
+  
+  fdr<-tp/(tp+fn)
+  
+  fdr_matrix[i,]<-c(as.character(probs[i,1]),probs[i,2],fdr,tresh)
+  
+  
+  
+  
+}
+colnames(fdr_matrix)<-c("sample_id","Prob","FDR","tresh")
+fdr_matrix<-as.data.frame(fdr_matrix)
+
+fdr_matrix$tresh<-as.numeric(as.character(fdr_matrix$tresh))
+fdr_matrix$FDR<-as.numeric(as.character(fdr_matrix$FDR))
+fdr_matrix_recall<-merge(probs,fdr_matrix,by="sample_id")
+fdr_matrix_recall$TP53<-as.factor(fdr_matrix$TP53)
+
+
+#precision
+fdr_matrix<-matrix(NA,nrow=nrow(probs),ncol=4)
+for (i in seq(1,nrow(probs))){
+  tresh=probs[i,3]
+  
+  conf<-confusionMatrix(factor(ifelse(probs$Prob>tresh,1,0),levels = c(0,1)),reference=factor(probs$TP53,c(0,1)))$table
+  
+  tp<-conf[2,2]
+  fp<-conf[2,1]
+  fn<-conf[1,2]
+  tn<-conf[1,1]
+  
+  fdr<-tp/(tp+fp)
+  
+  fdr_matrix[i,]<-c(as.character(probs[i,1]),probs[i,2],fdr,tresh)
+  
+  
+  
+  
+}
+colnames(fdr_matrix)<-c("sample_id","Prob","FDR","tresh")
+fdr_matrix<-as.data.frame(fdr_matrix)
+
+fdr_all<-merge(fdr_matrix_recall,fdr_matrix,by="sample_id")
+fdr_all[,13:22] <- lapply(fdr_all[,13:22], as.character)
+fdr_all[,13:22] <- lapply(fdr_all[,13:22], as.numeric)
+fdr_all$TP53<-as.factor(fdr_all$TP53)
+
+library(ggnewscale)
+ggplot(fdr_all,aes(x=tresh.x,color=TP53))+
+  geom_point(size=0.85,alpha=0.43,aes(y=FDR.x))+
+  theme_linedraw()+scale_colour_manual(values = c("deepskyblue4","orange"))+new_scale_color()+geom_point(size=0.85,alpha=0.43,aes(y=FDR.y,color=TP53))+scale_color_manual(values = c("deepskyblue4","tomato"))+xlab("Treshold")+
+  ylab("Value")+ scale_x_continuous(breaks=seq(0,1,0.1))+theme(text=element_text(size=11,  family="Helvetica"))
+
+
+#CL
+library(caret)
+probs<-read.table("/home/bfito/Scripts/Figures/Fig3/All_CL_probs_CNV_sets")
+probs[probs$PPM1D..8493.>1.4|probs$MDM2..4193.>1.4|probs$MDM4..4194.>1.5|probs$TP53..7157.<(0.66),]$TP53<-1
+fdr_matrix<-matrix(NA,nrow=nrow(probs),ncol=4)
+for (i in seq(1,nrow(probs))){
+  tresh=probs[i,3]
+  
+  conf<-confusionMatrix(factor(ifelse(probs$Prob>tresh,1,0),levels = c(0,1)),reference=factor(probs$TP53,c(0,1)))$table
+  
+  tp<-conf[2,2]
+  fp<-conf[2,1]
+  
+  fdr<-fp/(tp+fp)
+  
+  fdr_matrix[i,]<-c(as.character(probs[i,1]),probs[i,2],fdr,tresh)
+  
+  
+  
+  
+}
+colnames(fdr_matrix)<-c("sample_id","TP53","FDR","tresh")
+fdr_matrix<-as.data.frame(fdr_matrix)
+
+fdr_matrix$tresh<-as.numeric(as.character(fdr_matrix$tresh))
+fdr_matrix$FDR<-as.numeric(as.character(fdr_matrix$FDR))
+fdr_matrix$TP53<-as.factor(fdr_matrix$TP53)
+a<-read.csv("/home/bfito/CCLE_gene_cn.csv")
+colnames(a)[1]<-"DepMap_ID"
+info<-read.csv("/home/bfito/Data/sample_info.csv")
+cl_cnv<-a[,c("USP7..7874.","ATM..472.","CHEK2..11200.","USP28..57646.","CNOT2..4848.","YEATS4..8089.","MDM4..4194.","MDM2..4193.","PPM1D..8493.","TP53..7157.","DepMap_ID")]
+cl_cnv<-merge(info[,c(1,6)],cl_cnv,by="DepMap_ID")
+colnames(cl_cnv)[2]<-"sample_id"
+
+fdr_matrix<-merge(fdr_matrix,cl_cnv,by="sample_id")
+fdr_matrix<-merge(fdr_matrix,probs[,c(1,4)],by="sample_id")
+library(ggpubr)
+ggplot(fdr_matrix,aes(x=tresh,y=FDR,color=TP53))+geom_point()+
+  theme_minimal()+geom_hline(yintercept = 0.39,linetype="dashed",color="lightgrey")+xlab("Probability of being mutated (treshold)")+scale_colour_manual(values = c("deepskyblue2","darkred"))+
+  geom_linerange(data = fdr_matrix[fdr_matrix$MDM4..4194.>1.5&fdr_matrix$TP53==0,],aes(x=tresh, ymax=1, ymin=0.85),alpha=1,color="#3C5488B2")+
+  geom_linerange(data = fdr_matrix[fdr_matrix$MDM2..4193.>1.4 &fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.85, ymin=0.7),alpha=1,color="#4DBBD5B2")+
+  geom_linerange(data = fdr_matrix[fdr_matrix$PPM1D..8493.>1.4&fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.7, ymin=0.55),alpha=1,color="#00A087B2")+
+  geom_linerange(data = fdr_matrix[(fdr_matrix$TP53..7157.)<=(0.65) &fdr_matrix$TP53==0,],aes(x=tresh, ymax=0.55, ymin=0.4),alpha=1,color="#E64B35B2")+ylab("FDR CL")+ scale_x_continuous(breaks=seq(0,1,0.1))+ scale_x_continuous(breaks=seq(0,1,0.1))+theme(axis.text.y = element_text(color="black"),axis.text.x = element_text(color="black",angle = 25,vjust = 0.5),text=element_text(size=16,  family="Helvetica",colour="black"))+ guides(colour = guide_legend(override.aes = list(size=3)))
+
+
+
+#4. Percentage of phenos, mut, wt 
+
+
+probs_TUM<-read.table("/home/bfito/Scripts/Figures/Fig1/probs_noLGGGBM_noMDM*_NoCNV>0_TCGAlabs")
+levels(probs_TUM$type)<-c("TP53ness","TP53 WT","TP53 MUT")
+
+fig1<-ggplot(probs_TUM[!is.na(probs_TUM$type),],aes(fill=type,x=1,y=1))+geom_bar(stat = "identity",position="fill",alpha=0.8) +scale_y_continuous(labels = scales::percent)+xlab("")+ylab("Percentage")+theme_pubr()+scale_fill_manual(values = alpha(colour = c("orange1","dodgerblue","dodgerblue4"),alpha = 0))+theme(legend.text = element_text(face = "plain",size=14),legend.position = "bottom",axis.text.x=element_blank(),axis.ticks.x=element_blank(),legend.title = element_blank())
+
+
+library(ggsci)
+
+#5.Stacked barplot of phenocopies per CT
+
+gistic2_tresh<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUM_nottresholded")
+gistic2_treshnot<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUMs_tresholded")
+gistic2_tresh<-merge(gistic2_tresh,gistic2_treshnot,by="sample_id")
+colnames(probs_TUM)[4]<-"TP53_CFES"
+prob_matrix_pan<-merge(probs_TUM,gistic2_tresh,by="sample_id")
+
+tresh=0.6
+prob_matrix_pan$Pred<-NA
+prob_matrix_pan[prob_matrix_pan$TP53_CFES==0 & prob_matrix_pan$Prob>tresh,]$Pred<-"Phenocopy"
+prob_matrix_pan[prob_matrix_pan$TP53_CFES==1 & prob_matrix_pan$Prob>tresh,]$Pred<-"PRED&CFES=1"
+prob_matrix_pan[prob_matrix_pan$TP53_CFES==0 & prob_matrix_pan$Prob<tresh,]$Pred<-"PRED&CFES=0"
+prob_matrix_pan[prob_matrix_pan$TP53_CFES==1 & prob_matrix_pan$Prob<tresh,]$Pred<-"Antiphenos"
+splice_muts_cbio<-c("TCGA-18-3417","TCGA-25-2042","TCGA-33-6738","TCGA-33-AASD", "TCGA-39-5039","TCGA-44-7669","TCGA-49-4488","TCGA-55-7913","TCGA-56-8629","TCGA-69-8255","TCGA-73-A9RS","TCGA-CN-5355","TCGA-CN-6010","TCGA-CR-7401","TCGA-LA-A446","TCGA-MP-A4T9","TCGA-UF-A71E")
+prob_matrix_pan[prob_matrix_pan$sample_id %in% splice_muts_cbio,]$Pred<-"PRED&CFES=1"
+
+
+palette<-c("lightgrey","#92C5DE","#F4A582","#BA0040","#0571B0",viridis(4))
+prob_matrix_pan<-subset(prob_matrix_pan,prob_matrix_pan$Prob>0.6 & prob_matrix_pan$TP53_CFES==0)
+prob_matrix_pan$amp<-NA
+
+
+prob_matrix_pan[prob_matrix_pan$MDM2>0.8 & prob_matrix_pan$MDM4<0.9 & prob_matrix_pan$PPM1D<0.9,]$amp<-"MDM2_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2<0.8 & prob_matrix_pan$MDM4<0.9 & prob_matrix_pan$PPM1D>0.9,]$amp<-"PPM1D_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2<0.8 & prob_matrix_pan$MDM4>0.9 & prob_matrix_pan$PPM1D<0.9,]$amp<-"MDM4_amp"
+
+prob_matrix_pan[prob_matrix_pan$TP53>(-0.75)&prob_matrix_pan$MDM2>0.8 & prob_matrix_pan$MDM4>0.9&prob_matrix_pan$PPM1D>0.9|prob_matrix_pan$TP53>(-0.75)&prob_matrix_pan$MDM2>0.8 & prob_matrix_pan$MDM4>0.9 | prob_matrix_pan$TP53>(-0.75)&prob_matrix_pan$PPM1D_CNV>0.9 & prob_matrix_pan$MDM4>0.9 |prob_matrix_pan$TP53>(-0.75)&prob_matrix_pan$PPM1D>0.9 & prob_matrix_pan$MDM2>0.8  ,]$amp<-"1<amp"
+prob_matrix_pan[prob_matrix_pan$TP53<(-0.75) & !is.na(prob_matrix_pan$amp),]$amp<-"TP53_deleted+MDM4/2/PPM1D"
+prob_matrix_pan[prob_matrix_pan$TP53<(-0.75) & prob_matrix_pan$MDM2<0.8 & prob_matrix_pan$MDM4<0.9 & prob_matrix_pan$PPM1D<0.9,]$amp<-"TP53_deleted"
+prob_matrix_pan[is.na(prob_matrix_pan$amp),]$amp<-"Undefined"
+
+und<-prob_matrix_pan[prob_matrix_pan$amp=="Undefined",]
+
+table(und[und$USP28_CNV<(-0.5),]$cancer_type)/table(prob_matrix_pan[!(prob_matrix_pan$MDM2_CNV>0.8|prob_matrix_pan$PPM1D_CNV>0.9|prob_matrix_pan$MDM4_CNV>0.9|prob_matrix_pan$TP53_CNV<(-1)),]$cancer_type)
+
+
+prob_matrix_pan$n<-NA
+for (i in seq(1,nrow(prob_matrix_pan))){
+  ct<-prob_matrix_pan[i,]$cancer_type
+  prob_matrix_pan[i,]$n<-nrow(prob_matrix_pan[prob_matrix_pan$cancer_type==ct,])
+}
+
+prob_matrix_pan$n<-paste0(prob_matrix_pan$cancer_type,"\n (n=",prob_matrix_pan$n,")")
+prob_matrix_pan$amp<-factor(x = prob_matrix_pan$amp,levels =c("TP53_deleted","TP53_deleted+MDM4/2/PPM1D","MDM2_amp","MDM4_amp",
+                                                              "PPM1D_amp","1<Phenocopy","Undefined"))
+#prob_matrix_pan<-prob_matrix_pan[!prob_matrix_pan$cancer_type %in% c("DLBC","KIRC"),]
+library(ggsci)
+library(aRtsy)
+palette<-c(colorPalette("mixer3"),"gray91")
+ggplot(prob_matrix_pan[ !is.na(prob_matrix_pan$amp) & prob_matrix_pan$TP53_CFES==0,],aes(x=1,fill=amp))+
+  geom_bar(position = "fill")+scale_fill_manual(values = alpha(palette,alpha = 0.7))+xlab("Tumors")+ylab("Percentage")+theme_pubr()+ theme(axis.text.x=element_blank(),axis.ticks.x=element_blank())+
+  facet_wrap(~n,nrow=1)+theme(
+    strip.background = element_blank(),strip.placement = "right",strip.text = element_text(face = "bold",size=11),legend.position = "bottom",legend.box.just = "top",legend.title=element_blank(),legend.text = element_text(face = "plain",size=12),text=element_text(size=12,  family="Helvetica"))+
+  guides(fill = guide_legend(nrow = 1))+scale_y_continuous(labels = scales::percent)
+
+ggplot(prob_matrix_pan[ !is.na(prob_matrix_pan$amp) & prob_matrix_pan$TP53_CFES==0,],aes(x=1,fill=amp))+
+  geom_bar(position = "fill")+scale_fill_manual(values = c(pal_nejm("default", alpha = 0.7)(5),"grey"))+ylab("Percentage")+theme_pubr()+ theme(axis.text.x=element_blank(),axis.ticks.x=element_blank())+theme(
+    strip.background = element_blank(),strip.placement = "right",strip.text = element_text(face = "bold",size=11),legend.position = "top",legend.box.just = "top",legend.title=element_blank(),legend.text = element_text(face = "plain",size=12),text=element_text(size=12,  family="Helvetica"))+
+  guides(fill = guide_legend(nrow = 1))+scale_y_continuous(labels = scales::percent)+guides(fill=guide_legend(nrow=3,byrow=TRUE))
+
+
+
+
+library(colortools)
+
+colortools::
+  c("olivedrab","dodgerblue3" ,"#0B486B" ,"#A8DBA8", "#CFF09E")
+
+ggarrange(fig1,fig2)
+ggplot(prob_matrix_pan[ !is.na(prob_matrix_pan$amp) & prob_matrix_pan$TP53==0,],aes(x=1,fill=amp))+geom_bar(position = "fill")+scale_fill_manual(values = alpha(palette,alpha = 0.7))+xlab("Tumors")+ylab("Percentage")+theme_minimal()+ theme(axis.text.x=element_blank(),axis.ticks.x=element_blank())
+  
+#SAME BUT USING TRESHOLDS
+
+gistic2_tresh<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUM_nottresholded")
+gistic2_treshnot<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUMs_tresholded")
+gistic2_tresh<-merge(gistic2_tresh,gistic2_treshnot,by="sample_id")
+colnames(probs_TUM)[4]<-"TP53_CFES"
+prob_matrix_pan<-merge(probs_TUM,gistic2_tresh,by="sample_id")
+
+tresh=0.6
+prob_matrix_pan$Pred<-NA
+prob_matrix_pan[prob_matrix_pan$TP53_CFES==0 & prob_matrix_pan$Prob>tresh,]$Pred<-"Phenocopy"
+prob_matrix_pan[prob_matrix_pan$TP53_CFES==1 & prob_matrix_pan$Prob>tresh,]$Pred<-"PRED&CFES=1"
+prob_matrix_pan[prob_matrix_pan$TP53_CFES==0 & prob_matrix_pan$Prob<tresh,]$Pred<-"PRED&CFES=0"
+prob_matrix_pan[prob_matrix_pan$TP53_CFES==1 & prob_matrix_pan$Prob<tresh,]$Pred<-"Antiphenos"
+splice_muts_cbio<-c("TCGA-18-3417","TCGA-25-2042","TCGA-33-6738","TCGA-33-AASD", "TCGA-39-5039","TCGA-44-7669","TCGA-49-4488","TCGA-55-7913","TCGA-56-8629","TCGA-69-8255","TCGA-73-A9RS","TCGA-CN-5355","TCGA-CN-6010","TCGA-CR-7401","TCGA-LA-A446","TCGA-MP-A4T9","TCGA-UF-A71E")
+prob_matrix_pan[prob_matrix_pan$sample_id %in% splice_muts_cbio,]$Pred<-"PRED&CFES=1"
+
+
+palette<-c("lightgrey","#92C5DE","#F4A582","#BA0040","#0571B0",viridis(4))
+prob_matrix_pan<-subset(prob_matrix_pan,prob_matrix_pan$Prob>0.6 & prob_matrix_pan$TP53_CFES==0)
+prob_matrix_pan$amp<-NA
+
+
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV==2 & prob_matrix_pan$MDM4_CNV!=2 & prob_matrix_pan$PPM1D_CNV!=2,]$amp<-"MDM2_CNV_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV!=2 & prob_matrix_pan$MDM4_CNV!=2 & prob_matrix_pan$PPM1D_CNV==2,]$amp<-"PPM1D_CNV_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV!=2 & prob_matrix_pan$MDM4_CNV==2 & prob_matrix_pan$PPM1D_CNV!=2,]$amp<-"MDM4_CNV_amp"
+
+prob_matrix_pan[prob_matrix_pan$TP53_CNV>(-1)&prob_matrix_pan$MDM2_CNV==2 & prob_matrix_pan$MDM4_CNV==2&prob_matrix_pan$PPM1D_CNV==2|prob_matrix_pan$TP53_CNV>(-1)&prob_matrix_pan$MDM2_CNV==2 & prob_matrix_pan$MDM4_CNV==2 | prob_matrix_pan$TP53_CNV>(-1)&prob_matrix_pan$PPM1D_CNV==2 & prob_matrix_pan$MDM4_CNV==2 |prob_matrix_pan$TP53_CNV>(-1)&prob_matrix_pan$PPM1D_CNV==2 & prob_matrix_pan$MDM2_CNV==2  ,]$amp<-"1<amp"
+prob_matrix_pan[prob_matrix_pan$TP53_CNV<(0) & !is.na(prob_matrix_pan$amp),]$amp<-"TP53_CNV_deleted+MDM4_CNV/2/PPM1D_CNV"
+prob_matrix_pan[prob_matrix_pan$TP53_CNV<(-1) & prob_matrix_pan$MDM2_CNV!=2 & prob_matrix_pan$MDM4_CNV!=2 & prob_matrix_pan$PPM1D_CNV!=2,]$amp<-"TP53_CNV_deleted"
+prob_matrix_pan[is.na(prob_matrix_pan$amp),]$amp<-"Undefined"
+
+und<-prob_matrix_pan[prob_matrix_pan$amp=="Undefined",]
+
+table(prob_matrix_pan$amp)
+
+prob_matrix_pan$n<-NA
+for (i in seq(1,nrow(prob_matrix_pan))){
+  ct<-prob_matrix_pan[i,]$cancer_type
+  prob_matrix_pan[i,]$n<-nrow(prob_matrix_pan[prob_matrix_pan$cancer_type==ct,])
+}
+
+prob_matrix_pan$n<-paste0(prob_matrix_pan$cancer_type,"\n (n=",prob_matrix_pan$n,")")
+#prob_matrix_pan$amp<-factor(x = prob_matrix_pan$amp,levels =c("TP53_deleted","TP53_deleted+MDM4/2/PPM1D","MDM2_amp","MDM4_amp","PPM1D_amp","1<Phenocopy","Undefined"))
+prob_matrix_pan<-prob_matrix_pan[!prob_matrix_pan$cancer_type %in% c("DLBC","KIRC"),]
+library(ggsci)
+library(aRtsy)
+palette<-c(colorPalette("mixer3"),"tomato","gray91")
+ggplot(prob_matrix_pan[ !is.na(prob_matrix_pan$amp) & prob_matrix_pan$TP53_CFES==0,],aes(x=1,fill=amp))+
+  geom_bar(position = "fill")+scale_fill_manual(values = alpha(palette,alpha = 0.7))+xlab("Tumors")+ylab("Percentage")+theme_pubr()+ theme(axis.text.x=element_blank(),axis.ticks.x=element_blank())+
+  facet_wrap(~n,nrow=1)+theme(
+    strip.background = element_blank(),strip.placement = "right",strip.text = element_text(face = "bold",size=11),legend.position = "bottom",legend.box.just = "top",legend.title=element_blank(),legend.text = element_text(face = "plain",size=12),text=element_text(size=12,  family="Helvetica"))+
+  guides(fill = guide_legend(nrow = 1))+scale_y_continuous(labels = scales::percent)
+
+
+
+
+library(colortools)
+
+colortools::
+  c("olivedrab","dodgerblue3" ,"#0B486B" ,"#A8DBA8", "#CFF09E")
+
+ggarrange(fig1,fig2)
+ggplot(prob_matrix_pan[ !is.na(prob_matrix_pan$amp) & prob_matrix_pan$TP53==0,],aes(x=1,fill=amp))+geom_bar(position = "fill")+scale_fill_manual(values = alpha(palette,alpha = 0.7))+xlab("Tumors")+ylab("Percentage")+theme_minimal()+ theme(axis.text.x=element_blank(),axis.ticks.x=element_blank())
+
+
+##DENSITY
+
+
+
+prob_matrix_pan<-merge(probs_TUM,gistic2_tresh,by="sample_id")
+prob_matrix_pan$amp<-NA
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV>0.8 & prob_matrix_pan$MDM4_CNV<0.9 & prob_matrix_pan$PPM1D_CNV<0.9,]$amp<-"MDM2_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV<0.8 & prob_matrix_pan$MDM4_CNV<0.9 & prob_matrix_pan$PPM1D_CNV>0.9,]$amp<-"PPM1D_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV<0.8 & prob_matrix_pan$MDM4_CNV>0.9 & prob_matrix_pan$PPM1D_CNV<0.9,]$amp<-"MDM4_amp"
+
+prob_matrix_pan[prob_matrix_pan$TP53>(-0.75)&prob_matrix_pan$MDM2_CNV>0.8 & prob_matrix_pan$MDM4_CNV>0.9&prob_matrix_pan$PPM1D_CNV>0.9|prob_matrix_pan$TP53>(-0.75)&prob_matrix_pan$MDM2_CNV>0.8 & prob_matrix_pan$MDM4_CNV>0.9 | prob_matrix_pan$TP53>(-0.75)&prob_matrix_pan$PPM1D_CNV>0.9 & prob_matrix_pan$MDM4_CNV>0.9 |prob_matrix_pan$TP53>(-0.75)&prob_matrix_pan$PPM1D_CNV>0.9 & prob_matrix_pan$MDM2_CNV>0.8  ,]$amp<-"1<amp"
+prob_matrix_pan[prob_matrix_pan$TP53_CNV<(-0.75) & !is.na(prob_matrix_pan$amp),]$amp<-"TP53_deleted+MDM4/2/PPM1D"
+prob_matrix_pan[prob_matrix_pan$TP53_CNV<(-0.75) & prob_matrix_pan$MDM2_CNV<0.8 & prob_matrix_pan$MDM4_CNV<0.9 & prob_matrix_pan$PPM1D_CNV<0.9,]$amp<-"TP53_deleted"
+
+df<-list(mdm2=prob_matrix_pan[prob_matrix_pan$amp=="MDM2_amp",]$Prob,ppm1d=prob_matrix_pan[prob_matrix_pan$amp=="PPM1D_amp",]$Prob,mdm4=prob_matrix_pan[prob_matrix_pan$amp=="MDM4_amp",]$Prob,tp53=prob_matrix_pan[prob_matrix_pan$amp=="TP53_deleted",]$Prob)
+
+df<-prob_matrix_pan[prob_matrix_pan$amp=="MDM2_amp",]
+
+
+density<-ggplot(prob_matrix_pan, aes(x = Prob)) +
+  geom_density(data = prob_matrix_pan[prob_matrix_pan$amp=="MDM2_amp",],color="#4DBBD5B2",aes(y=..density..), size = 1)+geom_density(data = prob_matrix_pan[prob_matrix_pan$amp=="MDM4_amp",],aes(y=..density..), size = 1,color="red")+geom_density(data = prob_matrix_pan[prob_matrix_pan$amp=="PPM1D_amp",],aes(y=..density..), size = 1,color="#00A087B2")+
+  geom_density(data = prob_matrix_pan[prob_matrix_pan$amp=="TP53_deleted",],aes(y=..density..,color="tomato"), size = 1)+labs( y = "Density")+
+  theme_classic()+ theme_pubr()+scale_y_continuous(position = "right")+theme_linedraw()+  scale_colour_manual(name = 'the colour', values =c('#4DBBD5B2'='#4DBBD5B2','tomato'='tomato'), labels = c('MDM2 amp','TP53 deleted'))
+
+
+
+
+
+table(prob_matrix_pan$amp)
+prob_matrix_pan[prob_matrix_pan$MDM4_CNV>0.9 & prob_matrix_pan$TPR_CNV>1.4,]$amp<-"MDM4+TPR_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV>0.8 & prob_matrix_pan$MDM4_CNV<0.9 & prob_matrix_pan$PPM1D_CNV<0.9 & prob_matrix_pan$CNOT2_CNV<1 & prob_matrix_pan$YEATS4_CNV<1,]$amp<-"MDM2_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV>0.8 & prob_matrix_pan$MDM4_CNV<0.9 & prob_matrix_pan$PPM1D_CNV<0.9 & prob_matrix_pan$CNOT2_CNV>1 & prob_matrix_pan$YEATS4_CNV<1,]$amp<-"MDM2_CNOT2_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV>0.8 & prob_matrix_pan$MDM4_CNV<0.9 & prob_matrix_pan$PPM1D_CNV<0.9 & prob_matrix_pan$CNOT2_CNV<1 & prob_matrix_pan$YEATS4_CNV>1,]$amp<-"MDM2_YEATS4_amp"
+prob_matrix_pan[prob_matrix_pan$MDM2_CNV>0.8 & prob_matrix_pan$MDM4_CNV<0.9 & prob_matrix_pan$PPM1D_CNV<0.9 & prob_matrix_pan$CNOT2_CNV>1 & prob_matrix_pan$YEATS4_CNV>1,]$amp<-"MDM2_CNOT2_YEATS4_amp"
+prob_matrix_pan[prob_matrix_pan$TP53_CNV<(-0.5)  & prob_matrix_pan$MDM2_CNV>0.8 | prob_matrix_pan$TP53_CNV<(-0.5)& prob_matrix_pan$MDM4_CNV>0.9 |prob_matrix_pan$TP53_CNV<(-0.5) & prob_matrix_pan$PPM1D_CNV>0.9,]$amp<-"TP53_deleted+Phenos"
+prob_matrix_pan[prob_matrix_pan$TP53_CNV<(-0.5) & prob_matrix_pan$MDM2_CNV<0.8 & prob_matrix_pan$MDM4_CNV<0.9 & prob_matrix_pan$PPM1D_CNV<0.9 ,]$amp<-"TP53_deleted"
+
+
+ggplot(prob_matrix_pan[ !is.na(prob_matrix_pan$amp) & prob_matrix_pan$TP53==0,],aes(x=1,fill=amp))+geom_bar(position = "fill")+scale_fill_manual(values=c(pal_npg( alpha = 0.7)(10),"lightgrey"))+xlab("Tumors")+ylab("Percentage")+theme_pubr()+ theme(axis.text.x=element_blank(),
+                                                                                                                                                                                                                                                             axis.ticks.x=element_blank())+  facet_wrap(~n,nrow=2)+theme(legend.position = "right",legend.box.just = "top",legend.title=element_blank())
+
+
+
+ggplot(prob_matrix_pan[prob_matrix_pan$TP53==0,],aes(x=amp,y=Prob,fill=amp))+geom_boxplot(alpha=0.3)+geom_jitter(data = prob_matrix_pan[prob_matrix_pan$TP53==0,],aes(x=amp,y=Prob,color=amp),
+                                                                                                                        pch=19, size=1.5,alpha=.8)+xlab("Type")+theme_pubr()+scale_fill_manual(values=c(pal_npg( alpha = 0.7)(10),"lightgrey"))+scale_color_manual(values=c(pal_npg( alpha = 0.7)(10),"lightgrey"))+ theme(legend.position = "bottom",axis.text.x = element_text(angle = 15, vjust =1, hjust=1))
+
+
+
+#6. Probs VS known phenocopies and TP53 deletions
+
+probs_TUM<-read.table("/home/bfito/Scripts/Figures/Fig1/probs_noLGGGBM_noMDM*_NoCNV>0_TCGAlabs")
+
+gistic2_tresh<-read.table("/home/bfito/Scripts/Figures/Fig3/CNV_TUMs_tresholded")
+
+prob_matrix_pan<-merge(probs_TUM,gistic2_tresh,by="sample_id")
+
+tresh=0.6
+prob_matrix_pan$Pred<-NA
+prob_matrix_pan[prob_matrix_pan$TP53==0 & prob_matrix_pan$Prob>tresh,]$Pred<-"Phenocopy"
+prob_matrix_pan[prob_matrix_pan$TP53==1 & prob_matrix_pan$Prob>tresh,]$Pred<-"PRED&CFES=1"
+prob_matrix_pan[prob_matrix_pan$TP53==0 & prob_matrix_pan$Prob<tresh,]$Pred<-"PRED&CFES=0"
+prob_matrix_pan[prob_matrix_pan$TP53==1 & prob_matrix_pan$Prob<tresh,]$Pred<-"Antiphenos"
+splice_muts_cbio<-c("TCGA-18-3417","TCGA-25-2042","TCGA-33-6738","TCGA-33-AASD", "TCGA-39-5039","TCGA-44-7669","TCGA-49-4488","TCGA-55-7913","TCGA-56-8629","TCGA-69-8255","TCGA-73-A9RS","TCGA-CN-5355","TCGA-CN-6010","TCGA-CR-7401","TCGA-LA-A446","TCGA-MP-A4T9","TCGA-UF-A71E")
+prob_matrix_pan[prob_matrix_pan$sample_id %in% splice_muts_cbio,]$Pred<-"PRED&CFES=1"
+
+library(ggplot2)
+library(ggpubr)
+library(formattable)
+
+prob_matrix_pan$TP53<-as.factor(prob_matrix_pan$TP53)
+prob_matrix_pan$MDM2_CNV<-as.factor(prob_matrix_pan$MDM2_CNV)
+prob_matrix_pan$MDM4_CNV<-as.factor(prob_matrix_pan$MDM4_CNV)
+prob_matrix_pan$PPM1D_CNV<-as.factor(prob_matrix_pan$PPM1D_CNV)
+prob_matrix_pan$TP53_CNV<-as.factor(prob_matrix_pan$TP53_CNV)
+prob_matrix_pan1<-prob_matrix_pan[!prob_matrix_pan$MDM2_CNV %in% c(-1,-2),]
+prob_matrix_pan2<-prob_matrix_pan[!prob_matrix_pan$MDM4_CNV %in% c(-1,-2),]
+prob_matrix_pan3<-prob_matrix_pan[!prob_matrix_pan$PPM1D_CNV %in% c(-1,-2),]
+prob_matrix_pan4<-prob_matrix_pan[prob_matrix_pan$TP53_CNV %in% c(-1,-2,0),]
+
+levels(prob_matrix_pan$MDM2_CNV)<-c(NA,NA,0,1,2)
+levels(prob_matrix_pan$MDM4_CNV)<-c(NA,NA,0,1,2)
+levels(prob_matrix_pan$PPM1D_CNV)<-c(NA,NA,0,1,2)
+levels(prob_matrix_pan$TP53_CNV)<-c(-2,-1,0,NA,NA)
+a<-ggplot(as.data.frame(prob_matrix_pan1),mapping = aes(x =MDM2_CNV, y =Prob,fill=TP53))+geom_boxplot(alpha=0.7)+xlab("MDM2 CNV") +theme_linedraw()+ylab("Phenocopy score")+
+  scale_fill_manual(values = c("deepskyblue2","darkorange"))+ theme(text=element_text(size=16,  family="Helvetica"))
++
+  stat_compare_means(data=prob_matrix_pan1[prob_matrix_pan1$TP53==0,],ref.group = "0",label = "..p.format..",method = "t.test",vjust = -0.5,size=3.5)
+t_test(data=prob_matrix_pan[prob_matrix_pan$TP53==0,],formula=Prob~MDM2_CNV)
+b<-ggplot(as.data.frame(prob_matrix_pan2),mapping = aes(x =MDM4_CNV, y =Prob,fill=TP53))+geom_boxplot(alpha=0.7)+xlab("MDM4 CNV") +theme_linedraw()+ylab("Phenocopy score")+scale_fill_manual(values = c("deepskyblue2","darkorange"))+ theme(text=element_text(size=16,  family="Helvetica"))
++
+stat_compare_means(data=prob_matrix_pan2[prob_matrix_pan2$TP53==0,],ref.group = "0",label = "..p.format..",method = "t.test",vjust = -0.5,size=3.5)
+t_test(data=prob_matrix_pan[prob_matrix_pan$TP53==0,],formula=Prob~MDM4_CNV)
+
+c<-ggplot(as.data.frame(prob_matrix_pan3),mapping = aes(x =PPM1D_CNV, y =Prob,fill=TP53))+geom_boxplot(alpha=0.7)+xlab("PPM1D CNV") +theme_linedraw()+ylab("Phenocopy score")+scale_fill_manual(values = c("deepskyblue2","darkorange"))+ theme(text=element_text(size=16,  family="Helvetica"))
++
+stat_compare_means(data=prob_matrix_pan3[prob_matrix_pan3$TP53==0,],ref.group = "0",label = "..p.format..",method = "t.test",vjust = -0.5,size=3.5)
+t_test(data=prob_matrix_pan[prob_matrix_pan$TP53==0,],formula=Prob~PPM1D_CNV)
+d<-ggplot(as.data.frame(prob_matrix_pan4),mapping = aes(x =TP53_CNV, y =Prob,fill=TP53))+geom_boxplot(alpha=0.7)+xlab("TP53 CNV") +theme_linedraw()+ylab("Phenocopy score")+scale_fill_manual(values = c("deepskyblue2","darkorange"))+ theme(text=element_text(size=16,  family="Helvetica"))
++
+stat_compare_means(data=prob_matrix_pan4[prob_matrix_pan4$TP53==0,],ref.group = "0",label = "..p.format..",method = "t.test",vjust = -0.5,size=3.5)
+t_test(data=prob_matrix_pan[prob_matrix_pan$TP53==0,],formula=Prob~TP53_CNV)
+ggarrange(a,b+ 
+                  theme(axis.text.y = element_blank(),axis.title.y = element_blank()),c,d+ 
+                  theme(axis.text.y = element_blank(),axis.title.y = element_blank()),common.legend = T,legend = "none")
+
+
+
+
+
+#MERGE FIGURE
+library(ggpubr)
+library(png)
+#MAIN
+
+
+ggarrange(img1, img2, img5,img3, img4,
+          labels = c("A", "B", "C", "D","E"),
+          ncol = 2, nrow = 3)
+
+#SUPPLEMENTARY
+
+
+
+
+
